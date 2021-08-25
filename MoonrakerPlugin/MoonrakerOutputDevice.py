@@ -1,5 +1,6 @@
 import base64
 import json
+from os import posix_fadvise
 import os.path
 import urllib.parse
 from enum import Enum
@@ -147,12 +148,6 @@ class MoonrakerOutputDevice(OutputDevice):
         Logger.log("d", "Print set to: " + str(self._startPrint))
 
         self._dialog.deleteLater()
-        
-        Logger.log("d", "Connecting to Moonraker at {} ...".format(self._url))
-        # show a status message with spinner
-        messageText = self._getConnectMsgText()
-        self._message = Message(catalog.i18nc("@info:status", messageText), 0, False)
-        self._message.show()
 
         if self._power_device:
             self.getPrinterDeviceStatus()
@@ -193,10 +188,9 @@ class MoonrakerOutputDevice(OutputDevice):
                     Logger.log("d", log_msg)
                     self.postPrinterDevicePowerOn()
                 else:
-                    log_msg += " Sending FIRMWARE_RESTART before calling getPrinterInfo()"
+                    log_msg += " Calling restartKlipperService()"
                     Logger.log("d", log_msg)
-                    postData = json.dumps({}).encode()
-                    self._sendRequest('printer/firmware_restart', data = postData, dataIsJSON = True, on_success = self.getPrinterInfo)
+                    self.restartKlipperService()
 
     def getPrinterDeviceStatus(self):
         Logger.log("d", "Checking printer device [power {}] status".format(self._power_device))
@@ -210,6 +204,44 @@ class MoonrakerOutputDevice(OutputDevice):
         req = 'machine/device_power/device?' + urllib.parse.urlencode(params)
 
         self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = self.getPrinterInfo)
+
+    def sendFirmwareRestart(self, reply=None):
+        Logger.log("d", "Sending FIRMWARE_RESTART before calling getPrinterInfo()")
+        messageText = "Sending FIRMWARE_RESTART"
+        if not self._message:
+            self._message = Message(catalog.i18nc("@info:status", messageText), 0, False)
+        else:
+            self._message.setText(messageText)
+        self._message.show()
+        sleep(5)
+
+        postData = json.dumps({}).encode()
+        self._sendRequest('printer/firmware_restart', data = postData, dataIsJSON = True, on_success = self.getPrinterInfo)
+
+    def confirmRestartKlipperService(self):
+        Logger.log("d", "Confirming Restart of Klipper service")
+
+        messageText = "Problem reaching the printer.  Restarting the Klipper service may fix the problem."
+        messageText += "\nAre you sure you want to do this?  This may disrupt a current print job!"
+
+        self._message = Message(catalog.i18nc("@info:warning", messageText), 0, False)
+        self._message.addAction("restart_klipper", catalog.i18nc("@action:button", "OK"), "OK", catalog.i18nc("@info:tooltip", "Confirm restart of Klipper service"))
+        self._message.addAction("cancel", catalog.i18nc("@action:button", "Cancel"), "Cancel", catalog.i18nc("@info:tooltip", "Cancel and do nothing"))
+        self._message.actionTriggered.connect(self._onMessageActionTriggered)
+        self._message.show()
+
+    def restartKlipperService(self):
+        Logger.log("d", "Restarting Klipper service")
+
+        self._message = Message(catalog.i18nc("@info:status", "Restarting Klipper service"), 0, False)
+        self._message.show()
+        
+        postJSON = '{}'.encode()
+        params = {'service': 'klipper'}
+        req = 'machine/services/restart?' + urllib.parse.urlencode(params)
+
+        self._timeout_cnt = 0
+        self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = self.sendFirmwareRestart)
 
     def onMoonrakerConnectionTimeoutError(self):
         messageText = "Error: Connection to Moonraker at {} timed out.".format(self._url)
@@ -232,20 +264,29 @@ class MoonrakerOutputDevice(OutputDevice):
     def handlePrinterConnection(self, reply=None, error=None):
         self._timeout_cnt += 1
         timeout_cnt_max = 20
-        
+
         if self._timeout_cnt > timeout_cnt_max:
-            self.onMoonrakerConnectionTimeoutError()
+            self.confirmRestartKlipperService()
         else:
             sleep(0.5)
             self._message.setText(self._getConnectMsgText())
             self.getPrinterInfo()
 
     def getPrinterInfo(self, reply=None):
+        Logger.log("d", "Connecting to Moonraker at {} ...".format(self._url))
+        messageText = self._getConnectMsgText()
+        if not self._message:
+            # show a status message with spinner
+            self._message = Message(catalog.i18nc("@info:status", messageText), 0, False)
+        else:
+            self._message.setText(messageText)
+        self._message.show()
+
         self._sendRequest('printer/info', on_success = self.checkPrinterState, on_error = self.handlePrinterConnection)
 
     def onInstanceOnline(self, reply):
         # remove connection timeout message
-        self._timeout_cnt
+        self._timeout_cnt = 0
         self._message.hide()
         self._message = None
 
@@ -319,11 +360,20 @@ class MoonrakerOutputDevice(OutputDevice):
         self._timeout_cnt = 0
 
     def _onMessageActionTriggered(self, message, action):
-        if action == "open_browser":
-            QDesktopServices.openUrl(QUrl(self._url))
+        def removeMessage():
             if self._message:
                 self._message.hide()
                 self._message = None
+
+        if action == "open_browser":
+            removeMessage()
+            QDesktopServices.openUrl(QUrl(self._url))
+        elif action == "restart_klipper":
+            removeMessage()
+            self.restartKlipperService()
+        elif action == "cancel":
+            removeMessage()
+            self.onMoonrakerConnectionTimeoutError()
 
     def _onUploadProgress(self, bytesSent, bytesTotal):
         if bytesTotal > 0:
