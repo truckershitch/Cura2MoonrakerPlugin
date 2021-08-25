@@ -206,8 +206,8 @@ class MoonrakerOutputDevice(OutputDevice):
         self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = self.getPrinterInfo)
 
     def sendFirmwareRestart(self, reply=None):
-        Logger.log("d", "Sending FIRMWARE_RESTART before calling getPrinterInfo()")
         messageText = "Sending FIRMWARE_RESTART"
+        Logger.log("d", messageText)
         if not self._message:
             self._message = Message(catalog.i18nc("@info:status", messageText), 0, False)
         else:
@@ -217,6 +217,19 @@ class MoonrakerOutputDevice(OutputDevice):
 
         postData = json.dumps({}).encode()
         self._sendRequest('printer/firmware_restart', data = postData, dataIsJSON = True, on_success = self.getPrinterInfo)
+    
+    def restartKlipperService(self):
+        Logger.log("d", "Restarting Klipper service")
+
+        self._message = Message(catalog.i18nc("@info:status", "Restarting Klipper service"), 0, False)
+        self._message.show()
+        
+        postJSON = '{}'.encode()
+        params = {'service': 'klipper'}
+        req = 'machine/services/restart?' + urllib.parse.urlencode(params)
+        
+        self._timeout_cnt = 0
+        self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = self.sendFirmwareRestart)
 
     def confirmRestartKlipperService(self):
         Logger.log("d", "Confirming Restart of Klipper service")
@@ -229,19 +242,6 @@ class MoonrakerOutputDevice(OutputDevice):
         self._message.addAction("cancel", catalog.i18nc("@action:button", "Cancel"), "Cancel", catalog.i18nc("@info:tooltip", "Cancel and do nothing"))
         self._message.actionTriggered.connect(self._onMessageActionTriggered)
         self._message.show()
-
-    def restartKlipperService(self):
-        Logger.log("d", "Restarting Klipper service")
-
-        self._message = Message(catalog.i18nc("@info:status", "Restarting Klipper service"), 0, False)
-        self._message.show()
-        
-        postJSON = '{}'.encode()
-        params = {'service': 'klipper'}
-        req = 'machine/services/restart?' + urllib.parse.urlencode(params)
-
-        self._timeout_cnt = 0
-        self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = self.sendFirmwareRestart)
 
     def onMoonrakerConnectionTimeoutError(self):
         messageText = "Error: Connection to Moonraker at {} timed out.".format(self._url)
