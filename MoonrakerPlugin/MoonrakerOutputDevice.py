@@ -190,7 +190,7 @@ class MoonrakerOutputDevice(OutputDevice):
                 else:
                     log_msg += " Calling restartKlipperService()"
                     Logger.log("d", log_msg)
-                    self.restartKlipperService()
+                    self.restartKlipperService(sendFR = True)
 
     def getPrinterDeviceStatus(self):
         Logger.log("d", "Checking printer device [power {}] status".format(self._power_device))
@@ -218,11 +218,15 @@ class MoonrakerOutputDevice(OutputDevice):
         postData = json.dumps({}).encode()
         self._sendRequest('printer/firmware_restart', data = postData, dataIsJSON = True, on_success = self.getPrinterInfo)
     
-    def restartKlipperService(self):
+    def restartKlipperService(self, sendFR=False):
         Logger.log("d", "Restarting Klipper service")
 
         self._message = Message(catalog.i18nc("@info:status", "Restarting Klipper service"), 0, False)
         self._message.show()
+
+        if sendFR:
+            # printer needs an initial FIRMWARE_RESTART to initialize if powered off
+            self.sendFirmwareRestart()
         
         postJSON = '{}'.encode()
         params = {'service': 'klipper'}
@@ -233,6 +237,10 @@ class MoonrakerOutputDevice(OutputDevice):
 
     def confirmRestartKlipperService(self):
         Logger.log("d", "Confirming Restart of Klipper service")
+
+        if self._message:
+            self._message.hide()
+            self._message = None
 
         messageText = "Problem reaching the printer.  Restarting the Klipper service may fix the problem."
         messageText += "\nAre you sure you want to do this?  This may disrupt a current print job!"
