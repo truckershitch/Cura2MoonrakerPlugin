@@ -101,7 +101,7 @@ class MoonrakerOutputDevice(OutputDevice):
             fileName = os.path.basename(fileName)
         else:
             fileName = "%s." % Application.getInstance().getPrintInformation().jobName
-        
+
         # Translate filename
         if self._trans_input and self._trans_output:
             transFileName = fileName.translate(fileName.maketrans(self._trans_input, self._trans_output, self._trans_remove if self._trans_remove else ""))
@@ -153,7 +153,7 @@ class MoonrakerOutputDevice(OutputDevice):
             self.getPrinterDeviceStatus()
         else:
             self.getPrinterInfo()
-    
+
     def checkPrinterState(self, reply=None):
         if reply:
             res = self._verifyReply(reply)
@@ -173,6 +173,8 @@ class MoonrakerOutputDevice(OutputDevice):
 
     def checkPrinterDeviceStatus(self, reply):
         if reply:
+            self._removeMessage()
+
             res = self._verifyReply(reply)
             power_status = res['result'][self._power_device]
             log_msg = "Power device [power {}] status == '{}';".format(self._power_device, power_status)
@@ -183,14 +185,9 @@ class MoonrakerOutputDevice(OutputDevice):
                 Logger.log("d", log_msg)
                 self.getPrinterInfo()
             elif power_status == 'off':
-                if self._startPrint:
-                    log_msg += " Calling postPrinterDevicePowerOn()"
-                    Logger.log("d", log_msg)
-                    self.postPrinterDevicePowerOn()
-                else:
-                    log_msg += " Calling restartKlipperService()"
-                    Logger.log("d", log_msg)
-                    self.restartKlipperService(sendFR = True)
+                log_msg += " Calling postPrinterDevicePowerOn()"
+                Logger.log("d", log_msg)
+                self.postPrinterDevicePowerOn()
 
     def getPrinterDeviceStatus(self):
         Logger.log("d", "Checking printer device [power {}] status".format(self._power_device))
@@ -198,49 +195,60 @@ class MoonrakerOutputDevice(OutputDevice):
 
     def postPrinterDevicePowerOn(self, reply=None):
         Logger.log("d", "Turning on Moonraker power device [power {}]".format(self._power_device))
-        
+
         postJSON = '{}'.encode()
         params = {'device': self._power_device, 'action': 'on'}
         req = 'machine/device_power/device?' + urllib.parse.urlencode(params)
 
-        self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = self.getPrinterInfo)
+        # printer may need to restart the klipper service
+        self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = self.sendFirmwareRestart)
 
-    def sendFirmwareRestart(self, reply=None):
+    def sendFirmwareRestart(self, reply=None, pause=False):
+        sleepSecs = 5
         messageText = "Sending FIRMWARE_RESTART"
+        if pause:
+            messageText = "Pausing {} seconds before sending FIRMWARE_RESTART.".format(sleepSecs)
         Logger.log("d", messageText)
-        if not self._message:
+
+        if self._message is None:
             self._message = Message(catalog.i18nc("@info:status", messageText), 0, False)
         else:
             self._message.setText(messageText)
         self._message.show()
-        sleep(5)
+
+        if pause:
+            sleep(sleepSecs)
 
         postData = json.dumps({}).encode()
-        self._sendRequest('printer/firmware_restart', data = postData, dataIsJSON = True, on_success = self.getPrinterInfo)
-    
-    def restartKlipperService(self, sendFR=False):
-        Logger.log("d", "Restarting Klipper service")
+        self._sendRequest('printer/firmware_restart', data = postData, dataIsJSON = True, on_success = self.getPrinterInfo, on_error = self.restartKlipperService)
 
-        self._message = Message(catalog.i18nc("@info:status", "Restarting Klipper service"), 0, False)
+    def restartKlipperService(self, reply=None, error=None):
+        sleepSecs = 5
+        messageText = "Restarting Klipper service."
+        Logger.log("d", messageText)
+        
+        if error:
+            messageText = "\nPausing {} seconds before restarting Klipper service.".format(sleepSecs)
+        if self._message is None:
+            self._message = Message(catalog.i18nc("@info:status", messageText), 0, False)
+        else:
+            self._message.setText(messageText)
         self._message.show()
 
-        if sendFR:
-            # printer needs an initial FIRMWARE_RESTART to initialize if powered off
-            self.sendFirmwareRestart()
-        
+        if error:
+            sleep(sleepSecs)
+
         postJSON = '{}'.encode()
         params = {'service': 'klipper'}
         req = 'machine/services/restart?' + urllib.parse.urlencode(params)
-        
+
         self._timeout_cnt = 0
-        self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = self.sendFirmwareRestart)
+        self._sendRequest(req, data = postJSON, dataIsJSON = True, on_success = lambda pauseBeforeFR: self.sendFirmwareRestart(pause = True))
 
     def confirmRestartKlipperService(self):
         Logger.log("d", "Confirming Restart of Klipper service")
 
-        if self._message:
-            self._message.hide()
-            self._message = None
+        self._removeMessage()
 
         messageText = "Problem reaching the printer.  Restarting the Klipper service may fix the problem."
         messageText += "\nAre you sure you want to do this?  This may disrupt a current print job!"
@@ -255,7 +263,7 @@ class MoonrakerOutputDevice(OutputDevice):
         messageText = "Error: Connection to Moonraker at {} timed out.".format(self._url)
         self._message.setLifetimeTimer(0)
         self._message.setText(messageText)
-            
+
         browseMessageText = "Check your Moonraker and Klipper settings."
         browseMessageText += "\nA FIRMWARE_RESTART may be necessary."
         if self._power_device:
@@ -265,18 +273,18 @@ class MoonrakerOutputDevice(OutputDevice):
         self._message.addAction("open_browser", catalog.i18nc("@action:button", "Open Browser"), "globe", catalog.i18nc("@info:tooltip", "Open browser to Moonraker."))
         self._message.actionTriggered.connect(self._onMessageActionTriggered)
         self._message.show()
-    
+
         self.writeError.emit(self)
         self._resetState()
 
     def handlePrinterConnection(self, reply=None, error=None):
         self._timeout_cnt += 1
-        timeout_cnt_max = 20
+        timeout_cnt_max = 10
 
         if self._timeout_cnt > timeout_cnt_max:
             self.confirmRestartKlipperService()
         else:
-            sleep(0.5)
+            sleep(1)
             self._message.setText(self._getConnectMsgText())
             self.getPrinterInfo()
 
@@ -293,10 +301,8 @@ class MoonrakerOutputDevice(OutputDevice):
         self._sendRequest('printer/info', on_success = self.checkPrinterState, on_error = self.handlePrinterConnection)
 
     def onInstanceOnline(self, reply):
-        # remove connection timeout message
         self._timeout_cnt = 0
-        self._message.hide()
-        self._message = None
+        self._removeMessage()
 
         self._stage = OutputStage.writing
         # show a progress message
@@ -316,8 +322,8 @@ class MoonrakerOutputDevice(OutputDevice):
             self._postData.append(self._stream.getvalue())
         else:
             self._postData.append(self._stream.getvalue().encode())
-        self._sendRequest('server/files/upload', name = self._fileName, data = self._postData, on_success = self.onCodeUploaded)    
-    
+        self._sendRequest('server/files/upload', name = self._fileName, data = self._postData, on_success = self.onCodeUploaded)
+
     def onCodeUploaded(self, reply):
         if self._stage != OutputStage.writing:
             return
@@ -329,9 +335,7 @@ class MoonrakerOutputDevice(OutputDevice):
         self._stream.close()
         self._stream = None
 
-        if self._message:
-            self._message.hide()
-            self._message = None
+        self._removeMessage()
 
         messageText = "Upload of '{}' to {} successfully completed"
 
@@ -368,19 +372,13 @@ class MoonrakerOutputDevice(OutputDevice):
         self._timeout_cnt = 0
 
     def _onMessageActionTriggered(self, message, action):
-        def removeMessage():
-            if self._message:
-                self._message.hide()
-                self._message = None
-
         if action == "open_browser":
-            removeMessage()
+            self._removeMessage()
             QDesktopServices.openUrl(QUrl(self._url))
         elif action == "restart_klipper":
-            removeMessage()
+            self._removeMessage()
             self.restartKlipperService()
         elif action == "cancel":
-            removeMessage()
             self.onMoonrakerConnectionTimeoutError()
 
     def _onUploadProgress(self, bytesSent, bytesTotal):
@@ -389,9 +387,7 @@ class MoonrakerOutputDevice(OutputDevice):
 
     def _onNetworkError(self, reply, error):
         Logger.log("e", repr(error))
-        if self._message:
-            self._message.hide()
-            self._message = None
+        self._removeMessage()
 
         errorString = ''
         if reply:
@@ -402,7 +398,7 @@ class MoonrakerOutputDevice(OutputDevice):
 
         self.writeError.emit(self)
         self._resetState()
-    
+
     def _verifyReply(self, reply):
         # Logger.log("d", "reply: %s" % str(byte_string, 'utf-8'))
 
@@ -415,6 +411,11 @@ class MoonrakerOutputDevice(OutputDevice):
             self.handlePrinterConnection()
 
         return response
+
+    def _removeMessage(self):
+        if self._message:
+            self._message.hide()
+            self._message = None
 
     def _sendRequest(self, path, name = None, data = None, dataIsJSON = False, on_success = None, on_error = None):
         url = self._url + path
@@ -431,7 +432,7 @@ class MoonrakerOutputDevice(OutputDevice):
         postData = data
         if data is not None:
             if not dataIsJSON:
-                # Create multi_part request           
+                # Create multi_part request
                 parts = QHttpMultiPart(QHttpMultiPart.FormDataType)
 
                 part_file = QHttpPart()
