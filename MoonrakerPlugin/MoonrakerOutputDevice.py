@@ -184,7 +184,11 @@ class MoonrakerOutputDevice(OutputDevice):
                 log_msg += " Calling getPrinterInfo()"
                 Logger.log("d", log_msg)
                 self.getPrinterInfo()
-            elif power_status == 'off':
+            elif not self._startPrint:
+                log_msg += " Calling sendFirmwareRestart()"
+                Logger.log("d", log_msg)
+                self.sendFirmwareRestart()
+            else:
                 log_msg += " Calling postPrinterDevicePowerOn()"
                 Logger.log("d", log_msg)
                 self.postPrinterDevicePowerOn()
